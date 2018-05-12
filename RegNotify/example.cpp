@@ -1,4 +1,6 @@
 #include <iostream>
+#include <thread>
+
 #include "reg_notify.hpp"
 
 
@@ -9,10 +11,15 @@ int main() {
 		RegistryListener listener;
 
 		// Start listening for changes, supplying a lambda as callback
-		listener.Subscribe("HKLM\\Software\\WinRAR", [] {
+		std::thread th{ [&] {listener.Subscribe("HKLM\\Software\\WinRAR", [] {
 			std::cout << "Change was detected!" << std::endl;
-		});
+		}); } };
 
+		using namespace std::chrono_literals;
+		std::this_thread::sleep_for(10s);
+
+		listener.StopAll();
+		th.join();
 	}
 	catch (const std::exception& err) {
 		std::cerr << err.what() << std::endl;

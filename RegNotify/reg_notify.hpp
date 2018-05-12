@@ -5,6 +5,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace reg_notify {
 
@@ -24,16 +25,31 @@ namespace reg_notify {
 
 	public:
 		RegistryListener()
-			: mKey(nullptr)
+			: mKey(nullptr),
+			mStopNotifyEvent(nullptr),
+			mSubscribeWakeupEvents()
 		{
-
+			// Initialize stopping event
+			mStopNotifyEvent = CreateEventA(
+				NULL,
+				TRUE,	// manual reset
+				FALSE,	// initialy not signaled
+				NULL	// no name
+			);
+			if (nullptr == mStopNotifyEvent) {
+				throw std::runtime_error("failed opening event. " + std::to_string(GetLastError()));
+			}
 		}
 
 		~RegistryListener()
 		{
 			if (this->mKey != nullptr) {
 				RegCloseKey(this->mKey);
-				this->mKey = nullptr;
+			}
+			for (const auto& ev : mSubscribeWakeupEvents) {
+				if (nullptr != ev) {
+					CloseHandle(ev);
+				}
 			}
 		}
 
@@ -48,15 +64,18 @@ namespace reg_notify {
 		 *						Example:  OnValueChange | OnKeyAttributesChange
 		 * Throws exception on error.
 		 */
-		void Subscribe(std::string keyPath, std::function<void()> callback, bool includeSubkeys=true, std::uint16_t callbackTriggers=OnAnyChange) {
+		void Subscribe(std::string keyPath, std::function<void()> callback, bool includeSubkeys = true, std::uint16_t callbackTriggers = OnAnyChange) {
 
 			// TODO
 			// overload for wstring
 
+			// TODO
+			// overload for std::vector<keyPath>
+
 			// Classify the root key
 			auto s_root_key = keyPath.substr(0, 4);
 			HKEY root_key = nullptr;
-			if ("HKLM" == s_root_key) {	root_key = HKEY_LOCAL_MACHINE; }
+			if ("HKLM" == s_root_key) { root_key = HKEY_LOCAL_MACHINE; }
 			else if ("HKCU" == s_root_key) { root_key = HKEY_CURRENT_USER; }
 			else if ("HKCR" == s_root_key) { root_key = HKEY_CLASSES_ROOT; }
 			else if ("HKCC" == s_root_key) { root_key = HKEY_CURRENT_CONFIG; }
@@ -76,6 +95,31 @@ namespace reg_notify {
 				throw std::runtime_error("failed opening registry key with code " + std::to_string(status));
 			}
 
+
+			// Initialize event via which RegNotifyChangeKeyValue will notify us
+			auto ev = CreateEventA(
+				NULL,
+				FALSE,	// no manual reset
+				FALSE,	// initialy not signaled
+				NULL	// no name
+			);
+			if (nullptr == ev) {
+				throw std::runtime_error("failed opening event. " + std::to_string(GetLastError()));
+			}
+			try {
+				mSubscribeWakeupEvents.emplace_back(ev);
+			}
+			catch (const std::exception& err) { 
+				// If CreateEvent succeeds but eplace_back throws we should not leak handles
+				CloseHandle(ev);
+				throw err;
+			}
+
+			// Construct our array of events that wake us up
+			std::vector<HANDLE> wakeups;
+			wakeups.emplace_back(mStopNotifyEvent);
+			wakeups.emplace_back(ev);
+
 			while (1) {
 
 				// Subscribe for changes
@@ -83,8 +127,8 @@ namespace reg_notify {
 					this->mKey,
 					includeSubkeys,
 					callbackTriggers,
-					nullptr,
-					FALSE
+					ev,
+					TRUE
 				);
 
 				if (ERROR_SUCCESS != status) {
@@ -93,14 +137,37 @@ namespace reg_notify {
 					throw std::runtime_error("failed subscribing to registry key with code " + std::to_string(status));
 				}
 
-				// Registry key was changed
-				callback();
+				auto res = WaitForMultipleObjects(2, &wakeups[0], FALSE, INFINITE);
+
+				if (res == WAIT_OBJECT_0) {
+					// Signaled to exit
+					return;
+				}
+				else if (res == WAIT_OBJECT_0 + 1) {
+					// Registry key was changed
+					callback();
+				}
+			}
+		}
+
+		/*
+		 * Stops all asynchronous operations and deletes all subscribtions to registry keys
+		 */
+		void StopAll() {
+			if (0 == SetEvent(mStopNotifyEvent)) {
+				throw std::runtime_error("Failed stopping registry subscriptions. " + std::to_string(GetLastError()));
 			}
 		}
 
 	private:
 
 		HKEY mKey;
+
+		// Contains events that are used by the RegNotifyChangeKeyValue function to notify us of a registry change
+		std::vector<HANDLE> mSubscribeWakeupEvents;
+
+		// We use Win32 event instead of std::cv because we use WaitForMultipleObjects
+		HANDLE mStopNotifyEvent;
 
 	};
 
