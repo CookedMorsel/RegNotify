@@ -3,6 +3,8 @@
 #include <Windows.h>
 
 #include <functional>
+#include <stdexcept>
+#include <string>
 
 namespace reg_notify {
 
@@ -21,12 +23,24 @@ namespace reg_notify {
 	class RegistryListener {
 
 	public:
-		RegistryListener();
-		~RegistryListener();
+		RegistryListener()
+			: mKey(nullptr)
+		{
+
+		}
+
+		~RegistryListener()
+		{
+			if (this->mKey != nullptr) {
+				RegCloseKey(this->mKey);
+				this->mKey = nullptr;
+			}
+		}
 
 		/*
 		 * Call Subscribe() to subscribe for specific registry key changes.
 		 * keyPath:				The full path of the registry key, seperated by '\' and starting with registry root keys in the format of HKLM or HKCU.
+		 *						Case insensitive.
 		 *						Example: "HKLM\\Software\\WinRAR"
 		 * callback:			The function to be called on the specified trigger events.
 		 * includeSubkeys:		If this parameter is true, the funtion reports changes in the specified key and also its subkeys.
@@ -51,21 +65,42 @@ namespace reg_notify {
 			else { throw std::invalid_argument("incorrect root key"); }
 
 			// Open the registry key with notify permissions
-			HKEY key = nullptr;
-			RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0, KEY_NOTIFY, &key);
-
-			// Subscribe for changes
-			RegNotifyChangeKeyValue(
-				key,
-				false,	// subtree
-				REG_NOTIFY_CHANGE_LAST_SET,
-				NULL,
-				FALSE
+			auto status = RegOpenKeyExA(
+				root_key,
+				keyPath.substr(keyPath.find_first_of('\\') + 1).c_str(),
+				0, KEY_NOTIFY, &this->mKey
 			);
+			if (ERROR_SUCCESS != status) {
+				if (ERROR_ACCESS_DENIED == status) throw std::runtime_error("access denied");
+				if (ERROR_FILE_NOT_FOUND == status) throw std::invalid_argument("key path");
+				throw std::runtime_error("failed opening registry key with code " + std::to_string(status));
+			}
+
+			while (1) {
+
+				// Subscribe for changes
+				status = RegNotifyChangeKeyValue(
+					this->mKey,
+					includeSubkeys,
+					callbackTriggers,
+					nullptr,
+					FALSE
+				);
+
+				if (ERROR_SUCCESS != status) {
+					RegCloseKey(this->mKey);
+					this->mKey = nullptr;
+					throw std::runtime_error("failed subscribing to registry key with code " + std::to_string(status));
+				}
+
+				// Registry key was changed
+				callback();
+			}
 		}
 
 	private:
 
+		HKEY mKey;
 
 	};
 
