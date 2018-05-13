@@ -95,11 +95,11 @@ namespace reg_notify {
 			}
 
 			// CloseHandle will be called on function exit
-			//auto HandleDeleter = [](HANDLE h) {
-			//	if (INVALID_HANDLE_VALUE != h) { CloseHandle(h); }
-			//};
-			//// unique_ptr ctor is noexcept
-			//std::unique_ptr<std::remove_pointer_t<decltype(reg_key)>, decltype(HandleDeleter)> pRegKey{ reg_key, HandleDeleter };
+			auto HandleDeleter = [](HANDLE h) {
+				if (INVALID_HANDLE_VALUE != h) { CloseHandle(h); }
+			};
+			// unique_ptr ctor is noexcept
+			std::unique_ptr<std::remove_pointer_t<decltype(reg_key)>, decltype(HandleDeleter)> pRegKey{ reg_key, HandleDeleter };
 
 
 			// Initialize event via which RegNotifyChangeKeyValue will notify us
