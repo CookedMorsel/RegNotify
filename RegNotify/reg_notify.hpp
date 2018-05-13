@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <memory>
 
 namespace reg_notify {
 
@@ -25,8 +26,7 @@ namespace reg_notify {
 
 	public:
 		RegistryListener()
-			: mKey(nullptr),
-			mStopNotifyEvent(nullptr),
+			: mStopNotifyEvent(nullptr),
 			mSubscribeWakeupEvents()
 		{
 			// Initialize stopping event
@@ -36,18 +36,16 @@ namespace reg_notify {
 				FALSE,	// initialy not signaled
 				NULL	// no name
 			);
+
 			if (nullptr == mStopNotifyEvent) {
-				throw std::runtime_error("failed opening event. " + std::to_string(GetLastError()));
+				throw std::runtime_error("failed opening event: " + std::to_string(GetLastError()));
 			}
 		}
 
 		~RegistryListener()
 		{
-			if (this->mKey != nullptr) {
-				RegCloseKey(this->mKey);
-			}
 			for (const auto& ev : mSubscribeWakeupEvents) {
-				if (nullptr != ev) {
+				if (nullptr != ev && INVALID_HANDLE_VALUE != ev) {
 					CloseHandle(ev);
 				}
 			}
@@ -84,16 +82,24 @@ namespace reg_notify {
 			else { throw std::invalid_argument("incorrect root key"); }
 
 			// Open the registry key with notify permissions
+			HKEY reg_key = nullptr;
 			auto status = RegOpenKeyExA(
 				root_key,
 				keyPath.substr(keyPath.find_first_of('\\') + 1).c_str(),
-				0, KEY_NOTIFY, &this->mKey
+				0, KEY_NOTIFY, &reg_key
 			);
 			if (ERROR_SUCCESS != status) {
 				if (ERROR_ACCESS_DENIED == status) throw std::runtime_error("access denied");
 				if (ERROR_FILE_NOT_FOUND == status) throw std::invalid_argument("key path");
-				throw std::runtime_error("failed opening registry key with code " + std::to_string(status));
+				throw std::runtime_error("failed opening registry key: " + std::to_string(status));
 			}
+
+			// CloseHandle will be called on function exit
+			//auto HandleDeleter = [](HANDLE h) {
+			//	if (INVALID_HANDLE_VALUE != h) { CloseHandle(h); }
+			//};
+			//// unique_ptr ctor is noexcept
+			//std::unique_ptr<std::remove_pointer_t<decltype(reg_key)>, decltype(HandleDeleter)> pRegKey{ reg_key, HandleDeleter };
 
 
 			// Initialize event via which RegNotifyChangeKeyValue will notify us
@@ -104,12 +110,12 @@ namespace reg_notify {
 				NULL	// no name
 			);
 			if (nullptr == ev) {
-				throw std::runtime_error("failed opening event. " + std::to_string(GetLastError()));
+				throw std::runtime_error("failed opening event: " + std::to_string(GetLastError()));
 			}
 			try {
 				mSubscribeWakeupEvents.emplace_back(ev);
 			}
-			catch (const std::exception& err) { 
+			catch (const std::exception& err) {
 				// If CreateEvent succeeds but eplace_back throws we should not leak handles
 				CloseHandle(ev);
 				throw err;
@@ -124,7 +130,7 @@ namespace reg_notify {
 
 				// Subscribe for changes
 				status = RegNotifyChangeKeyValue(
-					this->mKey,
+					reg_key,
 					includeSubkeys,
 					callbackTriggers,
 					ev,
@@ -132,9 +138,7 @@ namespace reg_notify {
 				);
 
 				if (ERROR_SUCCESS != status) {
-					RegCloseKey(this->mKey);
-					this->mKey = nullptr;
-					throw std::runtime_error("failed subscribing to registry key with code " + std::to_string(status));
+					throw std::runtime_error("failed subscribing to registry key: " + std::to_string(status));
 				}
 
 				auto res = WaitForMultipleObjects(2, &wakeups[0], FALSE, INFINITE);
@@ -155,19 +159,19 @@ namespace reg_notify {
 		 */
 		void StopAll() {
 			if (0 == SetEvent(mStopNotifyEvent)) {
-				throw std::runtime_error("Failed stopping registry subscriptions. " + std::to_string(GetLastError()));
+				throw std::runtime_error("Failed stopping registry subscriptions: " + std::to_string(GetLastError()));
 			}
 		}
 
 	private:
-
-		HKEY mKey;
 
 		// Contains events that are used by the RegNotifyChangeKeyValue function to notify us of a registry change
 		std::vector<HANDLE> mSubscribeWakeupEvents;
 
 		// We use Win32 event instead of std::cv because we use WaitForMultipleObjects
 		HANDLE mStopNotifyEvent;
+
+
 
 	};
 
