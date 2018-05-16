@@ -7,12 +7,14 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <chrono>
 
 namespace reg_notify {
 
 	// TODO
 	// Warn about 64 / 32 bit registry
 
+	using namespace std::chrono_literals;
 
 	enum CallbackTriggers {
 		OnSubkeyChange = 1,
@@ -52,38 +54,39 @@ namespace reg_notify {
 		}
 
 		/*
-		 * Call Subscribe() to subscribe for specific registry key changes.
-		 * keyPath:				The full path of the registry key, seperated by '\' and starting with registry root keys in the format of HKLM or HKCU.
-		 *						Case insensitive.
-		 *						Example: "HKLM\\Software\\WinRAR"
-		 * callback:			The function to be called on the specified trigger events.
-		 * includeSubkeys:		If this parameter is true, the funtion reports changes in the specified key and also its subkeys.
-		 * callbackTriggers:	This is a mask of any CallbackTriggers.
-		 *						Example:  OnValueChange | OnKeyAttributesChange
+		 * Call Subscribe() to subscribe for specific registry key changes. This function is blocking.
+		 *
+		 * keyPath: The full path of the registry key, seperated by '\' and starting with registry root keys in the format of HKLM or HKCU.
+		 *	 Case insensitive.
+		 *	 Example: "HKLM\\Software\\WinRAR"
+		 * callback: The function to be called on the specified trigger events.
+		 *   Callback is called within the thread context of the calling thread.
+		 *   While callback() is being executed, no monitoring is performed so multiple changes in the key will not result in a same number of calls to callback.
+		 * includeSubkeys: If this parameter is true, the funtion reports changes in the specified key and also its subkeys.
+		 * callbackTriggers: This is a mask of any CallbackTriggers.
+		 *	 Example:  OnValueChange | OnKeyAttributesChange
+		 * duration: The duration for Subscribe() to monitor, after which it returns.
+		 *
 		 * Throws exception on error.
 		 */
-		void Subscribe(std::string keyPath, std::function<void()> callback, bool includeSubkeys = true, std::uint16_t callbackTriggers = OnAnyChange) {
-
-			// TODO
-			// overload for wstring
-
-			// TODO
-			// overload for std::vector<keyPath>
+		void Subscribe(std::wstring keyPath, std::function<void()> callback, std::chrono::milliseconds duration = 0ms, bool includeSubkeys = true, std::uint16_t callbackTriggers = OnAnyChange) {
+			// Get start time
+			auto start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
 
 			// Classify the root key
 			auto s_root_key = keyPath.substr(0, 4);
 			HKEY root_key = nullptr;
-			if ("HKLM" == s_root_key) { root_key = HKEY_LOCAL_MACHINE; }
-			else if ("HKCU" == s_root_key) { root_key = HKEY_CURRENT_USER; }
-			else if ("HKCR" == s_root_key) { root_key = HKEY_CLASSES_ROOT; }
-			else if ("HKCC" == s_root_key) { root_key = HKEY_CURRENT_CONFIG; }
-			else if ("HKPD" == s_root_key) { root_key = HKEY_PERFORMANCE_DATA; }
-			else if ("HKU" == s_root_key) { root_key = HKEY_USERS; }
+			if (L"HKLM" == s_root_key) { root_key = HKEY_LOCAL_MACHINE; }
+			else if (L"HKCU" == s_root_key) { root_key = HKEY_CURRENT_USER; }
+			else if (L"HKCR" == s_root_key) { root_key = HKEY_CLASSES_ROOT; }
+			else if (L"HKCC" == s_root_key) { root_key = HKEY_CURRENT_CONFIG; }
+			else if (L"HKPD" == s_root_key) { root_key = HKEY_PERFORMANCE_DATA; }
+			else if (L"HKU" == s_root_key) { root_key = HKEY_USERS; }
 			else { throw std::invalid_argument("incorrect root key"); }
 
 			// Open the registry key with notify permissions
 			HKEY reg_key = nullptr;
-			auto status = RegOpenKeyExA(
+			auto status = RegOpenKeyExW(
 				root_key,
 				keyPath.substr(keyPath.find_first_of('\\') + 1).c_str(),
 				0, KEY_NOTIFY, &reg_key
@@ -116,7 +119,7 @@ namespace reg_notify {
 				mSubscribeWakeupEvents.emplace_back(ev);
 			}
 			catch (const std::exception& err) {
-				// If CreateEvent succeeds but eplace_back throws we should not leak handles
+				// If CreateEvent succeeds but emplace_back throws we should not leak handles
 				CloseHandle(ev);
 				throw err;
 			}
@@ -141,21 +144,53 @@ namespace reg_notify {
 					throw std::runtime_error("failed subscribing to registry key: " + std::to_string(status));
 				}
 
-				auto res = WaitForMultipleObjects(2, &wakeups[0], FALSE, INFINITE);
+				std::uint64_t time_to_wait = INFINITE;
+				if (duration.count() != 0) {
+					// Calculate how much waiting time we have left
+					auto ms_now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
+					time_to_wait = (duration - (ms_now - start_ms)).count();
+					time_to_wait = time_to_wait < 0 ? 0 : time_to_wait;
+				}
 
-				if (res == WAIT_OBJECT_0) {
+				// Wait for either registry change notify, exit signal or specified duration timeout
+				auto res = WaitForMultipleObjects(2, &wakeups[0], FALSE, static_cast<DWORD>(time_to_wait));
+
+				switch (res) {
+				case (WAIT_TIMEOUT):
+				{
+					return;
+				}
+				case (WAIT_OBJECT_0):
+				{
 					// Signaled to exit
 					return;
 				}
-				else if (res == WAIT_OBJECT_0 + 1) {
+				case (WAIT_OBJECT_0 + 1):
+				{
 					// Registry key was changed
 					callback();
+					break;
+				}
+				case (WAIT_FAILED):
+				{
+					throw std::runtime_error("WaitForMultipleObjects failed: " + std::to_string(GetLastError()));
+				}
+				default:
+				{
+					// Someone killed our mutex holder thread
+					throw std::runtime_error("WaitForMultipleObjects wait abandoned");
+				}
 				}
 			}
 		}
 
+		inline void Subscribe(std::string keyPath, std::function<void()> callback, std::chrono::milliseconds duration = 0ms, bool includeSubkeys = true, std::uint16_t callbackTriggers = OnAnyChange) {
+			std::wstring ws(keyPath.cbegin(), keyPath.cend());
+			this->Subscribe(ws, callback, duration, includeSubkeys, callbackTriggers);
+		}
+
 		/*
-		 * Stops all asynchronous operations and deletes all subscribtions to registry keys
+		 * Stops all asynchronous operations and deletes all subscriptions to registry keys
 		 */
 		void StopAll() {
 			if (0 == SetEvent(mStopNotifyEvent)) {
